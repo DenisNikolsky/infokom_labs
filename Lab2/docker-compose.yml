@@ -1,0 +1,113 @@
+services:
+  kafka:
+    image: apache/kafka:3.9.0
+    ports:
+      - "${KAFKA_EXTERNAL_PORT}:${KAFKA_EXTERNAL_PORT}"
+    healthcheck:
+      test: [ "CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+    environment:
+      KAFKA_NODE_ID: ${KAFKA_NODE_ID}                 # id этого узла
+      KAFKA_CLUSTER_ID: ${KAFKA_CLUSTER_ID}           # id кластера (один раз, константа)
+      KAFKA_PROCESS_ROLES: broker,controller          # single-node совмещает роли
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093    # 1 — это KAFKA_NODE_ID, @ — хост:порт контроллера
+
+      KAFKA_LISTENERS: INTERNAL://:9092,EXTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1       # один брокер — иначе consumer-группы падают
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+
+  kafka-init:
+    image: ${KAFKA_IMAGE}
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: >
+      sh -c "
+      /opt/kafka/bin/kafka-topics.sh 
+      --bootstrap-server kafka:9092 
+      --create --if-not-exists 
+      --topic ${KAFKA_TOPIC} 
+      --partitions ${KAFKA_TOPIC_PARTITIONS} 
+      --replication-factor ${KAFKA_TOPIC_REPLICATION_FACTOR};
+      
+      /opt/kafka/bin/kafka-topics.sh 
+      --bootstrap-server kafka:9092 
+      --alter 
+      --topic ${KAFKA_TOPIC} 
+      --partitions ${KAFKA_TOPIC_PARTITIONS};
+
+      /opt/kafka/bin/kafka-configs.sh 
+      --bootstrap-server kafka:9092 
+      --entity-type topics 
+      --entity-name ${KAFKA_TOPIC} 
+      --alter 
+      --add-config retention.ms=30000
+      "
+
+  user-service:
+    build: ./user-service
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_TOPIC: ${KAFKA_TOPIC}
+    ports: ["8001:8001"]
+
+  picker-service-1:
+    build: ./picker-service
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_TOPIC: ${KAFKA_TOPIC}
+      KAFKA_GROUP: picker-group
+      INSTANCE_NAME: picker-1
+    ports: ["8002:8002"]
+
+  picker-service-2:
+    build: ./picker-service
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_TOPIC: ${KAFKA_TOPIC}
+      KAFKA_GROUP: picker-group
+      INSTANCE_NAME: picker-2
+    ports: [ "8003:8002" ]
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    ports: ["8080:8080"]
+    environment:
+      KAFKA_CLUSTERS_0_NAME: lab
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: "true"
+    depends_on:
+      - kafka
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    ports: ["9308:9308"]
+    command:
+      --kafka.server=kafka:9092
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports: ["9090:9090"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    depends_on:
+      - kafka-exporter
+
+  grafana:
+    image: grafana/grafana:latest
+    ports: ["3002:3000"]
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${ADMIN_PASSWORD}

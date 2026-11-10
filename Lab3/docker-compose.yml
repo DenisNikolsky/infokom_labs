@@ -1,0 +1,77 @@
+services:
+  primary:
+    image: postgres:16
+    container_name: pg-primary
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: apppass
+      POSTGRES_DB: appdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - primary-data:/var/lib/postgresql/data
+      - ./primary-conf/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./primary-conf/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf", "-c", "hba_file=/etc/postgresql/pg_hba.conf"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d appdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  standby:
+    image: postgres:16
+    container_name: pg-standby
+    environment:
+      # Переменные нужны только для того, чтобы pg_basebackup мог подключиться
+      PGPASSWORD: replpass
+    ports:
+      - "5433:5432" # Пробрасываем на 5433, чтобы не конфликтовать с primary
+    volumes:
+      - standby-data:/var/lib/postgresql/data
+    depends_on:
+      primary:
+        condition: service_healthy
+
+  app:
+    build: ./app
+    container_name: lab4-app
+    ports:
+      - "8080:8080"
+    environment:
+      - PRIMARY_HOST=standby  # Теперь пишем в бывшую реплику
+      - PRIMARY_PORT=5432
+      - REPLICA_HOST=standby  # И читаем оттуда же (пока второго узла нет)
+      - REPLICA_PORT=5432
+    depends_on:
+      - primary
+      - standby
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: pg-exporter
+    environment:
+      # Подключаемся к нашему текущему primary (бывшему standby)
+      DATA_SOURCE_NAME: "postgresql://app:apppass@standby:5432/appdb?sslmode=disable"
+    ports:
+      - "9187:9187"
+
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+
+volumes:
+  primary-data:
+  standby-data: # Не забываем добавить новый volume
